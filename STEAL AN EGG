@@ -1,0 +1,981 @@
+--[[
+    ╔══════════════════════════════════════════════════════════╗
+    ║         STEAL A EGG - HUB COMPLETO v1.0                  ║
+    ║         Compatível com Delta Executor                    ║
+    ║         PC + Mobile | Arrastável | Responsivo            ║
+    ╚══════════════════════════════════════════════════════════╝
+]]
+
+--// Serviços
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+--// Configurações
+local CONFIG = {
+    EggFolderNames = {"Eggs", "Egg", "SpawnedEggs", "EggSpawns"},
+    RarityColors = {
+        Common = Color3.fromRGB(180, 180, 180),
+        Uncommon = Color3.fromRGB(80, 220, 100),
+        Rare = Color3.fromRGB(80, 140, 255),
+        Epic = Color3.fromRGB(180, 80, 255),
+        Legendary = Color3.fromRGB(255, 180, 40),
+        Mythic = Color3.fromRGB(255, 60, 60),
+        Secret = Color3.fromRGB(255, 255, 255),
+    },
+    DefaultRarityColor = Color3.fromRGB(255, 255, 255),
+    AutoUpdateInterval = 2,
+    AutoStealInterval = 0.5,
+}
+
+--// Estado
+local State = {
+    ESPEnabled = false,
+    AutoStealEnabled = false,
+    AutoStealRange = 30,
+    AutoStealDelay = 0.5,
+    Eggs = {},
+    ESPObjects = {},
+    Connections = {},
+    Minimized = false,
+    ActiveTab = "Eggs",
+}
+
+--// Utilitários
+local function safeParent(gui)
+    if gethui then
+        return gethui()
+    elseif CoreGui then
+        return CoreGui
+    else
+        return LocalPlayer:WaitForChild("PlayerGui")
+    end
+end
+
+local function getRarityColor(rarity)
+    if not rarity then return CONFIG.DefaultRarityColor end
+    for k, v in pairs(CONFIG.RarityColors) do
+        if string.find(string.lower(tostring(rarity)), string.lower(k)) then
+            return v
+        end
+    end
+    return CONFIG.DefaultRarityColor
+end
+
+local function getEggRarity(egg)
+    local rarity = nil
+    pcall(function()
+        if egg:GetAttribute("Rarity") then rarity = egg:GetAttribute("Rarity") end
+        if not rarity and egg:FindFirstChild("Rarity") then
+            rarity = egg.Rarity.Value or egg.Rarity
+        end
+        if not rarity and egg:GetAttribute("rarity") then rarity = egg:GetAttribute("rarity") end
+    end)
+    return rarity
+end
+
+local function getEggName(egg)
+    return egg.Name
+end
+
+local function getEggPosition(egg)
+    if egg:IsA("BasePart") then return egg.Position end
+    if egg:IsA("Model") then
+        local primary = egg.PrimaryPart or egg:FindFirstChildWhichIsA("BasePart")
+        if primary then return primary.Position end
+    end
+    return nil
+end
+
+local function distanceTo(pos)
+    if not pos then return math.huge end
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return math.huge end
+    return (hrp.Position - pos).Magnitude
+end
+
+local function teleportTo(pos)
+    if not pos then return end
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+    end
+end
+
+--// Coleta de ovos
+local function scanEggs()
+    local found = {}
+    local seen = {}
+    for _, folderName in ipairs(CONFIG.EggFolderNames) do
+        local folder = Workspace:FindFirstChild(folderName)
+        if folder then
+            for _, child in ipairs(folder:GetChildren()) do
+                if child:IsA("BasePart") or child:IsA("Model") then
+                    if not seen[child] then
+                        seen[child] = true
+                        local pos = getEggPosition(child)
+                        if pos then
+                            table.insert(found, {
+                                Instance = child,
+                                Name = getEggName(child),
+                                Rarity = getEggRarity(child),
+                                Position = pos,
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Fallback: varre Workspace por atributos "Egg"
+    if #found == 0 then
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if obj:GetAttribute("IsEgg") or obj:GetAttribute("Egg") then
+                local pos = getEggPosition(obj)
+                if pos then
+                    table.insert(found, {
+                        Instance = obj,
+                        Name = getEggName(obj),
+                        Rarity = getEggRarity(obj),
+                        Position = pos,
+                    })
+                end
+            end
+        end
+    end
+    return found
+end
+
+--// UI Principal
+local function createUI()
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "StealEggHub_" .. HttpService:GenerateGUID(false)
+    ScreenGui.ResetOnSpawn = false
+    ScreenGui.IgnoreGuiInset = true
+    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    ScreenGui.Parent = safeParent()
+
+    --// Botão Flutuante
+    local ToggleBtn = Instance.new("TextButton")
+    ToggleBtn.Name = "ToggleBtn"
+    ToggleBtn.Size = UDim2.new(0, 60, 0, 60)
+    ToggleBtn.Position = UDim2.new(0, 20, 0.5, -30)
+    ToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+    ToggleBtn.BorderSizePixel = 0
+    ToggleBtn.Text = "🥚"
+    ToggleBtn.TextSize = 28
+    ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    ToggleBtn.AutoButtonColor = false
+    ToggleBtn.Parent = ScreenGui
+
+    local toggleCorner = Instance.new("UICorner")
+    toggleCorner.CornerRadius = UDim.new(1, 0)
+    toggleCorner.Parent = ToggleBtn
+
+    local toggleStroke = Instance.new("UIStroke")
+    toggleStroke.Color = Color3.fromRGB(120, 100, 255)
+    toggleStroke.Thickness = 2
+    toggleStroke.Parent = ToggleBtn
+
+    local toggleGradient = Instance.new("UIGradient")
+    toggleGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 40, 150)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(120, 60, 200)),
+    })
+    toggleGradient.Rotation = 45
+    toggleGradient.Parent = ToggleBtn
+
+    --// Janela Principal
+    local Main = Instance.new("Frame")
+    Main.Name = "Main"
+    Main.Size = UDim2.new(0, 520, 0, 400)
+    Main.Position = UDim2.new(0.5, -260, 0.5, -200)
+    Main.BackgroundColor3 = Color3.fromRGB(22, 22, 34)
+    Main.BorderSizePixel = 0
+    Main.Visible = false
+    Main.Parent = ScreenGui
+
+    local mainCorner = Instance.new("UICorner")
+    mainCorner.CornerRadius = UDim.new(0, 16)
+    mainCorner.Parent = Main
+
+    local mainStroke = Instance.new("UIStroke")
+    mainStroke.Color = Color3.fromRGB(90, 70, 200)
+    mainStroke.Thickness = 2
+    mainStroke.Parent = Main
+
+    local mainGradient = Instance.new("UIGradient")
+    mainGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(28, 24, 48)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(18, 18, 28)),
+    })
+    mainGradient.Rotation = 90
+    mainGradient.Parent = Main
+
+    --// Barra de Título
+    local TitleBar = Instance.new("Frame")
+    TitleBar.Name = "TitleBar"
+    TitleBar.Size = UDim2.new(1, 0, 0, 45)
+    TitleBar.BackgroundColor3 = Color3.fromRGB(35, 30, 60)
+    TitleBar.BorderSizePixel = 0
+    TitleBar.Parent = Main
+
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 16)
+    titleCorner.Parent = TitleBar
+
+    local titleFix = Instance.new("Frame")
+    titleFix.Size = UDim2.new(1, 0, 0, 16)
+    titleFix.Position = UDim2.new(0, 0, 1, -16)
+    titleFix.BackgroundColor3 = Color3.fromRGB(35, 30, 60)
+    titleFix.BorderSizePixel = 0
+    titleFix.Parent = TitleBar
+
+    local Title = Instance.new("TextLabel")
+    Title.Size = UDim2.new(1, -100, 1, 0)
+    Title.Position = UDim2.new(0, 16, 0, 0)
+    Title.BackgroundTransparency = 1
+    Title.Text = "🥚  STEAL A EGG HUB"
+    Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Title.TextSize = 16
+    Title.Font = Enum.Font.GothamBold
+    Title.TextXAlignment = Enum.TextXAlignment.Left
+    Title.Parent = TitleBar
+
+    --// Botão Minimizar
+    local MinBtn = Instance.new("TextButton")
+    MinBtn.Size = UDim2.new(0, 32, 0, 32)
+    MinBtn.Position = UDim2.new(1, -76, 0, 6)
+    MinBtn.BackgroundColor3 = Color3.fromRGB(60, 50, 100)
+    MinBtn.BorderSizePixel = 0
+    MinBtn.Text = "—"
+    MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    MinBtn.TextSize = 18
+    MinBtn.Font = Enum.Font.GothamBold
+    MinBtn.Parent = TitleBar
+    Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 8)
+
+    --// Botão Fechar
+    local CloseBtn = Instance.new("TextButton")
+    CloseBtn.Size = UDim2.new(0, 32, 0, 32)
+    CloseBtn.Position = UDim2.new(1, -40, 0, 6)
+    CloseBtn.BackgroundColor3 = Color3.fromRGB(180, 45, 60)
+    CloseBtn.BorderSizePixel = 0
+    CloseBtn.Text = "✕"
+    CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    CloseBtn.TextSize = 14
+    CloseBtn.Font = Enum.Font.GothamBold
+    CloseBtn.Parent = TitleBar
+    Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 8)
+
+    --// Container de Abas
+    local TabBar = Instance.new("Frame")
+    TabBar.Size = UDim2.new(1, -20, 0, 36)
+    TabBar.Position = UDim2.new(0, 10, 0, 55)
+    TabBar.BackgroundColor3 = Color3.fromRGB(30, 28, 48)
+    TabBar.BorderSizePixel = 0
+    TabBar.Parent = Main
+    Instance.new("UICorner", TabBar).CornerRadius = UDim.new(0, 10)
+
+    local TabLayout = Instance.new("UIListLayout")
+    TabLayout.FillDirection = Enum.FillDirection.Horizontal
+    TabLayout.Padding = UDim.new(0, 4)
+    TabLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    TabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    TabLayout.Parent = TabBar
+
+    --// Container de Conteúdo
+    local Content = Instance.new("Frame")
+    Content.Name = "Content"
+    Content.Size = UDim2.new(1, -20, 1, -105)
+    Content.Position = UDim2.new(0, 10, 0, 98)
+    Content.BackgroundTransparency = 1
+    Content.Parent = Main
+
+    --// Cria abas
+    local Tabs = {}
+    local TabButtons = {}
+    local tabNames = {"Eggs", "Steal", "ESP", "Teleport"}
+    local tabIcons = {"🥚", "⚡", "👁", "🌀"}
+
+    local function switchTab(name)
+        State.ActiveTab = name
+        for n, f in pairs(Tabs) do
+            f.Visible = (n == name)
+        end
+        for n, b in pairs(TabButtons) do
+            TweenService:Create(b, TweenInfo.new(0.2), {
+                BackgroundColor3 = (n == name) and Color3.fromRGB(90, 70, 200) or Color3.fromRGB(45, 40, 75)
+            }):Play()
+            b.TextColor3 = (n == name) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(170, 170, 200)
+        end
+    end
+
+    for i, name in ipairs(tabNames) do
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(0, 115, 0, 28)
+        btn.BackgroundColor3 = Color3.fromRGB(45, 40, 75)
+        btn.BorderSizePixel = 0
+        btn.Text = tabIcons[i] .. " " .. name
+        btn.TextColor3 = Color3.fromRGB(170, 170, 200)
+        btn.TextSize = 13
+        btn.Font = Enum.Font.GothamBold
+        btn.Parent = TabBar
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+        TabButtons[name] = btn
+
+        local page = Instance.new("ScrollingFrame")
+        page.Size = UDim2.new(1, 0, 1, 0)
+        page.BackgroundTransparency = 1
+        page.BorderSizePixel = 0
+        page.ScrollBarThickness = 4
+        page.ScrollBarImageColor3 = Color3.fromRGB(120, 100, 255)
+        page.CanvasSize = UDim2.new(0, 0, 0, 0)
+        page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        page.Visible = false
+        page.Parent = Content
+
+        local pageLayout = Instance.new("UIListLayout")
+        pageLayout.Padding = UDim.new(0, 6)
+        pageLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        pageLayout.Parent = page
+
+        local pagePad = Instance.new("UIPadding")
+        pagePad.PaddingTop = UDim.new(0, 4)
+        pagePad.PaddingBottom = UDim.new(0, 4)
+        pagePad.PaddingLeft = UDim.new(0, 4)
+        pagePad.PaddingRight = UDim.new(0, 4)
+        pagePad.Parent = page
+
+        Tabs[name] = page
+
+        btn.MouseButton1Click:Connect(function()
+            switchTab(name)
+        end)
+    end
+
+    --// Helpers de UI
+    local function makeButton(parent, text, color, callback)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, -8, 0, 36)
+        btn.BackgroundColor3 = color or Color3.fromRGB(70, 60, 140)
+        btn.BorderSizePixel = 0
+        btn.Text = text
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.TextSize = 14
+        btn.Font = Enum.Font.GothamBold
+        btn.AutoButtonColor = false
+        btn.Parent = parent
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+
+        btn.MouseEnter:Connect(function()
+            TweenService:Create(btn, TweenInfo.new(0.15), {BackgroundColor3 = btn.BackgroundColor3:Lerp(Color3.new(1,1,1), 0.15)}):Play()
+        end)
+        btn.MouseLeave:Connect(function()
+            TweenService:Create(btn, TweenInfo.new(0.15), {BackgroundColor3 = color or Color3.fromRGB(70, 60, 140)}):Play()
+        end)
+
+        btn.MouseButton1Click:Connect(function()
+            TweenService:Create(btn, TweenInfo.new(0.08), {Size = UDim2.new(1, -8, 0, 32)}):Play()
+            task.wait(0.08)
+            TweenService:Create(btn, TweenInfo.new(0.08), {Size = UDim2.new(1, -8, 0, 36)}):Play()
+            if callback then callback() end
+        end)
+        return btn
+    end
+
+    local function makeLabel(parent, text, size, color)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -8, 0, size or 24)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = color or Color3.fromRGB(220, 220, 240)
+        lbl.TextSize = 14
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = parent
+        return lbl
+    end
+
+    local function makeToggle(parent, text, default, callback)
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(1, -8, 0, 34)
+        frame.BackgroundColor3 = Color3.fromRGB(32, 30, 52)
+        frame.BorderSizePixel = 0
+        frame.Parent = parent
+        Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -70, 1, 0)
+        lbl.Position = UDim2.new(0, 12, 0, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = Color3.fromRGB(220, 220, 240)
+        lbl.TextSize = 13
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = frame
+
+        local toggleBg = Instance.new("TextButton")
+        toggleBg.Size = UDim2.new(0, 44, 0, 22)
+        toggleBg.Position = UDim2.new(1, -54, 0.5, -11)
+        toggleBg.BackgroundColor3 = default and Color3.fromRGB(90, 70, 200) or Color3.fromRGB(60, 60, 80)
+        toggleBg.BorderSizePixel = 0
+        toggleBg.Text = ""
+        toggleBg.Parent = frame
+        Instance.new("UICorner", toggleBg).CornerRadius = UDim.new(1, 0)
+
+        local knob = Instance.new("Frame")
+        knob.Size = UDim2.new(0, 18, 0, 18)
+        knob.Position = default and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
+        knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        knob.BorderSizePixel = 0
+        knob.Parent = toggleBg
+        Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+        local state = default
+        toggleBg.MouseButton1Click:Connect(function()
+            state = not state
+            TweenService:Create(toggleBg, TweenInfo.new(0.2), {
+                BackgroundColor3 = state and Color3.fromRGB(90, 70, 200) or Color3.fromRGB(60, 60, 80)
+            }):Play()
+            TweenService:Create(knob, TweenInfo.new(0.2), {
+                Position = state and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
+            }):Play()
+            if callback then callback(state) end
+        end)
+        return frame
+    end
+
+    local function makeSlider(parent, text, min, max, default, callback)
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(1, -8, 0, 52)
+        frame.BackgroundColor3 = Color3.fromRGB(32, 30, 52)
+        frame.BorderSizePixel = 0
+        frame.Parent = parent
+        Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -20, 0, 22)
+        lbl.Position = UDim2.new(0, 12, 0, 4)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text .. ": " .. default
+        lbl.TextColor3 = Color3.fromRGB(220, 220, 240)
+        lbl.TextSize = 13
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = frame
+
+        local bar = Instance.new("Frame")
+        bar.Size = UDim2.new(1, -24, 0, 8)
+        bar.Position = UDim2.new(0, 12, 1, -20)
+        bar.BackgroundColor3 = Color3.fromRGB(50, 45, 75)
+        bar.BorderSizePixel = 0
+        bar.Parent = frame
+        Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+
+        local fill = Instance.new("Frame")
+        fill.Size = UDim2.new((default - min) / (max - min), 0, 1, 0)
+        fill.BackgroundColor3 = Color3.fromRGB(120, 100, 255)
+        fill.BorderSizePixel = 0
+        fill.Parent = bar
+        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 1, 0)
+        btn.BackgroundTransparency = 1
+        btn.Text = ""
+        btn.Parent = bar
+
+        local dragging = false
+        local function update(input)
+            local rel = math.clamp((input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+            local val = math.floor(min + (max - min) * rel + 0.5)
+            fill.Size = UDim2.new(rel, 0, 1, 0)
+            lbl.Text = text .. ": " .. val
+            if callback then callback(val) end
+        end
+
+        btn.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                update(input)
+            end
+        end)
+        btn.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = false
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                update(input)
+            end
+        end)
+        return frame
+    end
+
+    --// ===== ABA EGGS =====
+    local eggsPage = Tabs["Eggs"]
+    local eggsListFrame = Instance.new("Frame")
+    eggsListFrame.Size = UDim2.new(1, -8, 0, 220)
+    eggsListFrame.BackgroundColor3 = Color3.fromRGB(28, 26, 44)
+    eggsListFrame.BorderSizePixel = 0
+    eggsListFrame.Parent = eggsPage
+    Instance.new("UICorner", eggsListFrame).CornerRadius = UDim.new(0, 10)
+
+    local eggsScroll = Instance.new("ScrollingFrame")
+    eggsScroll.Size = UDim2.new(1, -8, 1, -8)
+    eggsScroll.Position = UDim2.new(0, 4, 0, 4)
+    eggsScroll.BackgroundTransparency = 1
+    eggsScroll.BorderSizePixel = 0
+    eggsScroll.ScrollBarThickness = 4
+    eggsScroll.ScrollBarImageColor3 = Color3.fromRGB(120, 100, 255)
+    eggsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    eggsScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    eggsScroll.Parent = eggsListFrame
+
+    local eggsLayout = Instance.new("UIListLayout")
+    eggsLayout.Padding = UDim.new(0, 4)
+    eggsLayout.Parent = eggsScroll
+
+    local eggsPad = Instance.new("UIPadding")
+    eggsPad.PaddingTop = UDim.new(0, 6)
+    eggsPad.PaddingLeft = UDim.new(0, 6)
+    eggsPad.PaddingRight = UDim.new(0, 6)
+    eggsPad.Parent = eggsScroll
+
+    makeButton(eggsPage, "🎯  TP to Nearest Egg", Color3.fromRGB(60, 130, 90), function()
+        local nearest, ndist = nil, math.huge
+        for _, egg in ipairs(State.Eggs) do
+            local d = distanceTo(egg.Position)
+            if d < ndist then ndist = d; nearest = egg end
+        end
+        if nearest then teleportTo(nearest.Position) end
+    end)
+
+    makeButton(eggsPage, "💎  TP to Best Egg", Color3.fromRGB(150, 100, 40), function()
+        local order = {"Secret", "Mythic", "Legendary", "Epic", "Rare", "Uncommon", "Common"}
+        local best, bestRank = nil, 999
+        for _, egg in ipairs(State.Eggs) do
+            local r = tostring(egg.Rarity or "Common")
+            for i, name in ipairs(order) do
+                if string.find(string.lower(r), string.lower(name)) and i < bestRank then
+                    bestRank = i; best = egg
+                end
+            end
+        end
+        if not best and #State.Eggs > 0 then best = State.Eggs[1] end
+        if best then teleportTo(best.Position) end
+    end)
+
+    --// ===== ABA STEAL =====
+    local stealPage = Tabs["Steal"]
+
+    makeToggle(stealPage, "⚡ Instant Steal", false, function(state)
+        if state then
+            local nearest, ndist = nil, math.huge
+            for _, egg in ipairs(State.Eggs) do
+                local d = distanceTo(egg.Position)
+                if d < ndist and d <= State.AutoStealRange then ndist = d; nearest = egg end
+            end
+            if nearest then
+                teleportTo(nearest.Position)
+                task.wait(0.15)
+                local clickDetector = nearest.Instance:FindFirstChildWhichIsA("ClickDetector", true)
+                if clickDetector then fireclickdetector(clickDetector) end
+                if nearest.Instance:IsA("BasePart") then
+                    pcall(function() nearest.Instance:Activate() end)
+                end
+            end
+        end
+    end)
+
+    makeToggle(stealPage, "🔄 Auto Steal", false, function(state)
+        State.AutoStealEnabled = state
+    end)
+
+    makeSlider(stealPage, "📏 Range (studs)", 5, 200, 30, function(v)
+        State.AutoStealRange = v
+    end)
+
+    makeSlider(stealPage, "⏱ Intervalo (ms)", 100, 3000, 500, function(v)
+        State.AutoStealDelay = v / 1000
+    end)
+
+    makeToggle(stealPage, "✅ Verificar disponibilidade", true, function(state)
+        State.CheckAvailability = state
+    end)
+
+    --// ===== ABA ESP =====
+    local espPage = Tabs["ESP"]
+
+    makeToggle(espPage, "👁 ESP Ativado", false, function(state)
+        State.ESPEnabled = state
+        if not state then
+            for _, obj in pairs(State.ESPObjects) do
+                if obj.gui then obj.gui:Destroy() end
+                if obj.highlight then obj.highlight:Destroy() end
+            end
+            State.ESPObjects = {}
+        end
+    end)
+
+    makeToggle(espPage, "📛 Mostrar Nome", true, function(state) State.ESPName = state end)
+    makeToggle(espPage, "📏 Mostrar Distância", true, function(state) State.ESPDistance = state end)
+    makeToggle(espPage, "💠 Mostrar Raridade", true, function(state) State.ESPRarity = state end)
+
+    makeLabel(espPage, "🎨 Cores por raridade:", 22, Color3.fromRGB(180, 180, 220))
+    for name, color in pairs(CONFIG.RarityColors) do
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(1, -8, 0, 22)
+        frame.BackgroundColor3 = Color3.fromRGB(28, 26, 44)
+        frame.BorderSizePixel = 0
+        frame.Parent = espPage
+        Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
+
+        local dot = Instance.new("Frame")
+        dot.Size = UDim2.new(0, 12, 0, 12)
+        dot.Position = UDim2.new(0, 12, 0.5, -6)
+        dot.BackgroundColor3 = color
+        dot.BorderSizePixel = 0
+        dot.Parent = frame
+        Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -40, 1, 0)
+        lbl.Position = UDim2.new(0, 32, 0, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = name
+        lbl.TextColor3 = Color3.fromRGB(220, 220, 240)
+        lbl.TextSize = 12
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = frame
+    end
+
+    --// ===== ABA TELEPORT =====
+    local tpPage = Tabs["Teleport"]
+
+    makeButton(tpPage, "🎯  TP to Nearest Egg", Color3.fromRGB(60, 130, 90), function()
+        local nearest, ndist = nil, math.huge
+        for _, egg in ipairs(State.Eggs) do
+            local d = distanceTo(egg.Position)
+            if d < ndist then ndist = d; nearest = egg end
+        end
+        if nearest then teleportTo(nearest.Position) end
+    end)
+
+    makeButton(tpPage, "💎  TP to Best Egg", Color3.fromRGB(150, 100, 40), function()
+        local order = {"Secret", "Mythic", "Legendary", "Epic", "Rare", "Uncommon", "Common"}
+        local best, bestRank = nil, 999
+        for _, egg in ipairs(State.Eggs) do
+            local r = tostring(egg.Rarity or "Common")
+            for i, name in ipairs(order) do
+                if string.find(string.lower(r), string.lower(name)) and i < bestRank then
+                    bestRank = i; best = egg
+                end
+            end
+        end
+        if not best and #State.Eggs > 0 then best = State.Eggs[1] end
+        if best then teleportTo(best.Position) end
+    end)
+
+    makeLabel(tpPage, "📍 Áreas do Mapa:", 26, Color3.fromRGB(180, 180, 220))
+
+    local areas = {
+        {name = "🏠 Spawn", pos = Vector3.new(0, 20, 0)},
+        {name = "⬆️ Céu (Y=500)", pos = Vector3.new(0, 500, 0)},
+        {name = "⬇️ Subsolo (Y=-100)", pos = Vector3.new(0, -100, 0)},
+    }
+
+    for _, area in ipairs(areas) do
+        makeButton(tpPage, area.name, Color3.fromRGB(70, 60, 140), function()
+            teleportTo(area.pos)
+        end)
+    end
+
+    --// Lista de todos os ovos (atualiza automaticamente)
+    makeLabel(tpPage, "🥚 Ovos Descobertos:", 26, Color3.fromRGB(180, 180, 220))
+
+    local tpScroll = Instance.new("ScrollingFrame")
+    tpScroll.Size = UDim2.new(1, -8, 0, 180)
+    tpScroll.BackgroundColor3 = Color3.fromRGB(28, 26, 44)
+    tpScroll.BorderSizePixel = 0
+    tpScroll.ScrollBarThickness = 4
+    tpScroll.ScrollBarImageColor3 = Color3.fromRGB(120, 100, 255)
+    tpScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    tpScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    tpScroll.Parent = tpPage
+    Instance.new("UICorner", tpScroll).CornerRadius = UDim.new(0, 10)
+
+    local tpList = Instance.new("UIListLayout")
+    tpList.Padding = UDim.new(0, 4)
+    tpList.Parent = tpScroll
+
+    local tpPad = Instance.new("UIPadding")
+    tpPad.PaddingTop = UDim.new(0, 6)
+    tpPad.PaddingLeft = UDim.new(0, 6)
+    tpPad.PaddingRight = UDim.new(0, 6)
+    tpPad.Parent = tpScroll
+
+    --// Atualizar lista de ovos
+    local function updateEggList()
+        for _, child in ipairs(eggsScroll:GetChildren()) do
+            if child:IsA("TextButton") or child:IsA("Frame") then
+                if child:GetAttribute("IsEggEntry") then child:Destroy() end
+            end
+        end
+        for _, child in ipairs(tpScroll:GetChildren()) do
+            if child:IsA("TextButton") then child:Destroy() end
+        end
+
+        for i, egg in ipairs(State.Eggs) do
+            local rarityColor = getRarityColor(egg.Rarity)
+            
+            -- Egg list na aba Eggs
+            local entry = Instance.new("Frame")
+            entry:SetAttribute("IsEggEntry", true)
+            entry.Size = UDim2.new(1, -8, 0, 36)
+            entry.BackgroundColor3 = Color3.fromRGB(35, 32, 55)
+            entry.BorderSizePixel = 0
+            entry.Parent = eggsScroll
+            Instance.new("UICorner", entry).CornerRadius = UDim.new(0, 8)
+
+            local dot = Instance.new("Frame")
+            dot.Size = UDim2.new(0, 10, 0, 10)
+            dot.Position = UDim2.new(0, 10, 0.5, -5)
+            dot.BackgroundColor3 = rarityColor
+            dot.BorderSizePixel = 0
+            dot.Parent = entry
+            Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+            local nameLbl = Instance.new("TextLabel")
+            nameLbl.Size = UDim2.new(1, -120, 1, 0)
+            nameLbl.Position = UDim2.new(0, 28, 0, 0)
+            nameLbl.BackgroundTransparency = 1
+            nameLbl.Text = egg.Name .. (egg.Rarity and (" [" .. tostring(egg.Rarity) .. "]") or "")
+            nameLbl.TextColor3 = rarityColor
+            nameLbl.TextSize = 13
+            nameLbl.Font = Enum.Font.GothamMedium
+            nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+            nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+            nameLbl.Parent = entry
+
+            local tpBtn = Instance.new("TextButton")
+            tpBtn.Size = UDim2.new(0, 70, 1, -8)
+            tpBtn.Position = UDim2.new(1, -76, 0, 4)
+            tpBtn.BackgroundColor3 = Color3.fromRGB(90, 70, 200)
+            tpBtn.BorderSizePixel = 0
+            tpBtn.Text = "TP"
+            tpBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            tpBtn.TextSize = 12
+            tpBtn.Font = Enum.Font.GothamBold
+            tpBtn.Parent = entry
+            Instance.new("UICorner", tpBtn).CornerRadius = UDim.new(0, 6)
+
+            tpBtn.MouseButton1Click:Connect(function()
+                teleportTo(egg.Position)
+            end)
+
+            -- Entry na aba Teleport
+            local tpEntry = Instance.new("TextButton")
+            tpEntry.Size = UDim2.new(1, -8, 0, 30)
+            tpEntry.BackgroundColor3 = Color3.fromRGB(35, 32, 55)
+            tpEntry.BorderSizePixel = 0
+            tpEntry.Text = "🌀  " .. egg.Name
+            tpEntry.TextColor3 = rarityColor
+            tpEntry.TextSize = 12
+            tpEntry.Font = Enum.Font.GothamMedium
+            tpEntry.TextXAlignment = Enum.TextXAlignment.Left
+            tpEntry.Parent = tpScroll
+            Instance.new("UICorner", tpEntry).CornerRadius = UDim.new(0, 6)
+
+            local tpad = Instance.new("UIPadding", tpEntry)
+            tpad.PaddingLeft = UDim.new(0, 10)
+
+            tpEntry.MouseButton1Click:Connect(function()
+                teleportTo(egg.Position)
+            end)
+        end
+    end
+
+    --// ESP Render Loop
+    local function renderESP()
+        if not State.ESPEnabled then return end
+        local existing = {}
+        for _, egg in ipairs(State.Eggs) do
+            local key = egg.Instance
+            existing[key] = true
+            if not State.ESPObjects[key] then
+                local billboard = Instance.new("BillboardGui")
+                billboard.Size = UDim2.new(0, 150, 0, 50)
+                billboard.AlwaysOnTop = true
+                billboard.StudsOffset = Vector3.new(0, 3, 0)
+                billboard.Adornee = egg.Instance:IsA("BasePart") and egg.Instance or (egg.Instance.PrimaryPart or egg.Instance:FindFirstChildWhichIsA("BasePart"))
+                if not billboard.Adornee then billboard.Adornee = egg.Instance end
+                billboard.Parent = safeParent()
+                
+                local lbl = Instance.new("TextLabel")
+                lbl.Size = UDim2.new(1, 0, 1, 0)
+                lbl.BackgroundTransparency = 1
+                lbl.TextColor3 = getRarityColor(egg.Rarity)
+                lbl.TextStrokeTransparency = 0
+                lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+                lbl.TextSize = 14
+                lbl.Font = Enum.Font.GothamBold
+                lbl.Parent = billboard
+
+                local highlight = Instance.new("Highlight")
+                highlight.FillColor = getRarityColor(egg.Rarity)
+                highlight.OutlineColor = Color3.new(1, 1, 1)
+                highlight.FillTransparency = 0.5
+                highlight.Adornee = egg.Instance
+                highlight.Parent = safeParent()
+
+                State.ESPObjects[key] = {gui = billboard, label = lbl, highlight = highlight}
+            end
+        end
+
+        -- Remove ESP antigo
+        for key, obj in pairs(State.ESPObjects) do
+            if not existing[key] then
+                if obj.gui then obj.gui:Destroy() end
+                if obj.highlight then obj.highlight:Destroy() end
+                State.ESPObjects[key] = nil
+            end
+        end
+
+        -- Atualiza texto
+        for key, obj in pairs(State.ESPObjects) do
+            for _, egg in ipairs(State.Eggs) do
+                if egg.Instance == key then
+                    local parts = {}
+                    if State.ESPName ~= false then table.insert(parts, egg.Name) end
+                    if State.ESPDistance ~= false then
+                        table.insert(parts, string.format("[%.0f]", distanceTo(egg.Position)))
+                    end
+                    if State.ESPRarity ~= false and egg.Rarity then
+                        table.insert(parts, "(" .. tostring(egg.Rarity) .. ")")
+                    end
+                    obj.label.Text = table.concat(parts, " ")
+                    break
+                end
+            end
+        end
+    end
+
+    --// Auto Steal Loop
+    task.spawn(function()
+        while task.wait(State.AutoStealDelay) do
+            if State.AutoStealEnabled then
+                local nearest, ndist = nil, math.huge
+                for _, egg in ipairs(State.Eggs) do
+                    local d = distanceTo(egg.Position)
+                    if d < ndist and d <= State.AutoStealRange then ndist = d; nearest = egg end
+                end
+                if nearest then
+                    teleportTo(nearest.Position)
+                    task.wait(0.1)
+                    local cd = nearest.Instance:FindFirstChildWhichIsA("ClickDetector", true)
+                    if cd then pcall(function() fireclickdetector(cd) end) end
+                    if nearest.Instance:IsA("BasePart") then
+                        pcall(function() nearest.Instance:Activate() end)
+                    end
+                end
+            end
+            renderESP()
+        end
+    end)
+
+    --// Scan loop
+    task.spawn(function()
+        while task.wait(CONFIG.AutoUpdateInterval) do
+            State.Eggs = scanEggs()
+            updateEggList()
+        end
+    end)
+
+    --// Drag
+    local function makeDraggable(frame, handle)
+        local dragging, dragStart, startPos
+        handle.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                dragStart = input.Position
+                startPos = frame.Position
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then dragging = false end
+                end)
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                local delta = input.Position - dragStart
+                frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end)
+    end
+
+    makeDraggable(Main, TitleBar)
+
+    --// Toggle Button
+    ToggleBtn.MouseButton1Click:Connect(function()
+        Main.Visible = not Main.Visible
+        if Main.Visible then
+            Main.Size = UDim2.new(0, 520, 0, 400)
+            TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+                Size = UDim2.new(0, 520, 0, 400)
+            }):Play()
+        end
+    end)
+
+    --// Min button
+    MinBtn.MouseButton1Click:Connect(function()
+        State.Minimized = not State.Minimized
+        if State.Minimized then
+            TweenService:Create(Main, TweenInfo.new(0.25), {Size = UDim2.new(0, 520, 0, 45)}):Play()
+            Content.Visible = false
+            TabBar.Visible = false
+        else
+            TweenService:Create(Main, TweenInfo.new(0.25), {Size = UDim2.new(0, 520, 0, 400)}):Play()
+            task.wait(0.15)
+            Content.Visible = true
+            TabBar.Visible = true
+        end
+    end)
+
+    --// Close button
+    CloseBtn.MouseButton1Click:Connect(function()
+        Main.Visible = false
+    end)
+
+    --// Init
+    switchTab("Eggs")
+    State.Eggs = scanEggs()
+    updateEggList()
+
+    Main.Visible = true
+    Main.Size = UDim2.new(0, 0, 0, 0)
+    TweenService:Create(Main, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 520, 0, 400)
+    }):Play()
+
+    return ScreenGui
+end
+
+--// Executar
+local success, err = pcall(createUI)
+if not success then
+    warn("[StealEggHub] Erro:", err)
+end
